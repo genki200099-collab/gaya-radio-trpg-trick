@@ -104,6 +104,7 @@ function newGame(room) {
       hand:[]
     })),
     pending:null,
+    comments:[],
     winnerSeats:null
   };
   deal(room);
@@ -146,6 +147,7 @@ function playCard(room, client, cardId, cpuMode) {
   const card = p.hand.splice(idx, 1)[0];
   g.lastDraw = g.lastDraw.filter(d => d.seat !== client.seat);
   g.trick.push({seat:client.seat, card});
+  pushComment(room, client.seat, 'play', card);
   addLog(room, p.name + 'さん：' + card.rank + suitLabel(card.suit).mark);
   g.turn++;
   if (g.trick.length === 4) startPause(room);
@@ -170,6 +172,7 @@ function finishPause(room) {
   const w = currentWinner(g);
   if (!w) return;
   g.players[w.seat].tricks++;
+  pushComment(room, w.seat, 'win', null);
   addLog(room, '獲得確定：' + g.players[w.seat].name + 'さん');
   g.trick = [];
   g.pending = null;
@@ -198,6 +201,7 @@ function drawAfter(room) {
       g.players[seat].hand.push(c);
       sortHand(g.players[seat].hand);
       g.lastDraw.push({seat, cardId:c.id});
+      pushComment(room, seat, 'draw', c);
     }
   }
   addLog(room, '補充：山札 ' + g.deck.length + '枚');
@@ -266,6 +270,7 @@ function buildView(room, seat) {
       trick:g.trick,
       pending:g.pending,
       lastDraw:g.lastDraw.filter(d => d.seat === seat),
+      comments:(g.comments || []).slice(0,4),
       log:g.log.slice(0, 18),
       results:g.results,
       winnerSeats:g.winnerSeats,
@@ -334,6 +339,55 @@ function handleMessage(client, msg) {
   if (data.type === 'again') {
     if (client.room) { client.room.game = null; broadcast(client.room); }
   }
+}
+
+
+function commentRoleKeyBySeat(room, seat) {
+  if (!room || !room.game) return 'k';
+  const role = roleFor(seat, room.game.round);
+  if (role === 'きくぞう役') return 'k';
+  if (role === 'ペグ役') return 'p';
+  if (role === 'なかとー役') return 'n';
+  return 'y';
+}
+function commentText(room, seat, kind, card) {
+  const key = commentRoleKeyBySeat(room, seat);
+  const n = room.game.players[seat].name;
+  const cardTxt = card ? (card.rank + suitLabel(card.suit).mark) : '';
+  if (key === 'k') {
+    if (kind === 'play') return 'GM進行です。' + cardTxt + 'で場を整えます。';
+    if (kind === 'win') return 'はい、このトリックは回収します。';
+    if (kind === 'draw') return '補充入りました。次の展開を見ましょう。';
+    return 'ルールに沿って進めます。';
+  }
+  if (key === 'p') {
+    if (kind === 'play') return 'ここで' + cardTxt + '！盛り上がってきた！';
+    if (kind === 'win') return 'よし、取った！これはデカい！';
+    if (kind === 'draw') return '補充きた！まだ全然いける！';
+    return 'いいですねぇ、場が動いてます。';
+  }
+  if (key === 'n') {
+    if (kind === 'play') return cardTxt + '。美しく置きます。';
+    if (kind === 'win') return 'きれいに決まりましたね。';
+    if (kind === 'draw') return '手札が整いました。';
+    return 'この流れ、悪くないです。';
+  }
+  if (kind === 'play') return 'ちょっと、' + cardTxt + 'でいいですか……？';
+  if (kind === 'win') return '……取れましたね。';
+  if (kind === 'draw') return '補充確認しました。';
+  return '少し整理しましょう。';
+}
+function pushComment(room, seat, kind, card) {
+  if (!room || !room.game || !isCpuSeat(room, seat)) return;
+  const g = room.game;
+  if (!g.comments) g.comments = [];
+  g.comments.unshift({
+    seat: seat,
+    roleKey: commentRoleKeyBySeat(room, seat),
+    text: commentText(room, seat, kind, card),
+    at: Date.now()
+  });
+  if (g.comments.length > 4) g.comments.length = 4;
 }
 
 function cpuName(seat) {

@@ -128,6 +128,80 @@ input,select{width:100%;border:1px solid var(--line);border-radius:12px;padding:
     grid-template-columns:1fr;
   }
 }
+
+.cpu-bubbles{
+  display:grid;
+  gap:6px;
+  margin-top:8px;
+}
+.cpu-bubble{
+  display:grid;
+  grid-template-columns:34px 1fr;
+  gap:7px;
+  align-items:start;
+  border:1px solid var(--line);
+  background:#fff;
+  border-radius:14px;
+  padding:7px;
+  box-shadow:0 4px 10px rgba(15,55,98,.05);
+  animation:bubbleIn .22s ease-out both;
+}
+.cpu-bubble img{
+  width:34px;
+  height:40px;
+  border-radius:11px;
+  object-fit:cover;
+  border:2px solid #fff;
+  box-shadow:0 3px 8px rgba(15,55,98,.12);
+}
+.cpu-bubble .bname{
+  font-size:10px;
+  font-weight:1000;
+  color:var(--navy);
+  line-height:1.1;
+}
+.cpu-bubble .btext{
+  margin-top:2px;
+  font-size:11px;
+  font-weight:900;
+  line-height:1.35;
+  color:#334155;
+}
+.cpu-bubble.k{border-color:#f2c94c;background:#fffdf2}
+.cpu-bubble.p{border-color:#ff9a9a;background:#fff5f5}
+.cpu-bubble.n{border-color:#9ed3ff;background:#f1f8ff}
+.cpu-bubble.y{border-color:#9fe7bf;background:#f3fff8}
+.cpu-bubble.k .bname{color:#8a5a00}
+.cpu-bubble.p .bname{color:#a12626}
+.cpu-bubble.n .bname{color:#0f5f96}
+.cpu-bubble.y .bname{color:#166534}
+.comment-mini{
+  margin-top:6px;
+  font-size:10px;
+  font-weight:900;
+  color:#64748b;
+}
+@keyframes bubbleIn{
+  from{opacity:0;transform:translateY(4px)}
+  to{opacity:1;transform:translateY(0)}
+}
+@media(max-width:899px){
+  .cpu-bubbles{
+    max-height:132px;
+    overflow:auto;
+  }
+  .cpu-bubble{
+    grid-template-columns:30px 1fr;
+    padding:6px;
+  }
+  .cpu-bubble img{
+    width:30px;
+    height:36px;
+  }
+  .cpu-bubble .btext{
+    font-size:10px;
+  }
+}
 </style>
 </head>
 <body>
@@ -176,10 +250,23 @@ function renderLobby(){var h='<section class="panel"><h2>待機室：'+esc(state
 function playerHTML(){var g=state.game,h='<div class="players">';for(var i=0;i<4;i++){var p=g.players[i],ri=roleIndex(p.role),cls='player'+(p.isCpu?' cpu':'');if(i===g.currentSeat)cls+=' active';if(g.pending&&i===g.pending.winner)cls+=' win';h+='<div class="'+cls+'"><div class="ptop"><img class="avatar" src="'+ROLES[ri].img+'"><div><div class="pname">'+esc(p.name)+'</div><div class="role">'+p.role+(p.isCpu?' / CPU':(i===mySeat?' / あなた':''))+'</div></div></div><div class="pstat"><div class="score">'+p.score+'点</div><div class="mini">'+p.tricks+'T<br>手札 '+p.handCount+'</div></div></div>';}return h+'</div>';}
 function scoreHTML(){var g=state.game,a=[];for(var i=0;i<4;i++)a.push({i:i,s:g.players[i].score,n:g.players[i].name});a.sort(function(x,y){return y.s-x.s;});var h='';for(i=0;i<a.length;i++)h+='<div class="scoreline"><span class="rank">'+(i+1)+'位 '+esc(a[i].n)+'</span><span class="scorepts">'+a[i].s+'点</span></div>';return h;}
 function cardHTML(c,small){return '<span class="card '+c.suit+(small?' smallcard':'')+'"><span class="num">'+c.rank+'</span><span class="mark">'+suit(c.suit).mark+'</span></span>';}
+function roleNameByKey(k){if(k==='k')return 'きくぞう';if(k==='p')return 'ペグ';if(k==='n')return 'なかとー';return 'ヤマ';}
+function roleIndexByKey(k){if(k==='k')return 0;if(k==='p')return 1;if(k==='n')return 2;return 3;}
+function cpuBubblesHTML(){
+  var g=state.game;
+  if(!g||!g.comments||!g.comments.length)return '';
+  var h='<div class="cpu-bubbles">';
+  for(var i=0;i<g.comments.length;i++){
+    var c=g.comments[i],idx=roleIndexByKey(c.roleKey),p=g.players[c.seat];
+    h+='<div class="cpu-bubble '+c.roleKey+'"><img src="'+ROLES[idx].img+'"><div><div class="bname">'+esc(roleNameByKey(c.roleKey))+' / '+esc(p?p.name:'CPU')+'</div><div class="btext">'+esc(c.text)+'</div></div></div>';
+  }
+  h+='</div>';
+  return h;
+}
 function tableHTML(){var g=state.game,o=[];for(var i=0;i<4;i++)o.push((g.leadSeat+i)%4);var pos=['top','right','bottom','left'],lead=g.trick.length?suit(g.trick[0].card.suit):null,h='<div class="table">';if(g.phase==='trickPause')h+='<div class="se">GET!</div>';for(i=0;i<o.length;i++){var seat=o[i],p=g.players[seat],played=null;for(var j=0;j<g.trick.length;j++)if(g.trick[j].seat===seat)played=g.trick[j].card;var cls='slot '+pos[i];if(seat===g.currentSeat)cls+=' next';if(g.pending&&seat===g.pending.winner)cls+=' winner';h+='<div class="'+cls+'"><div class="slotname">'+esc(p.name)+'<br>'+p.role+'</div>'+(played?cardHTML(played,true):'<div class="note">未プレイ</div>')+'</div>';}h+='<div class="center">'+(lead?lead.mark+'<br>'+lead.label:'時計回り')+'</div></div>';if(g.phase==='trickPause')h+='<div class="pause">獲得確認中<div class="bar"><span></span></div></div>';return h;}
 function speechHTML(){return '';}
 function turnHTML(){var g=state.game,seat=g.currentSeat,p=g.players[mySeat],isMine=seat===mySeat,h='<div class="turn"><div class="turnmain"><img src="'+ROLES[roleIndex(p.role)].img+'"><div><div class="turntitle">'+(isMine?'あなたの手番':'待機中')+'</div><div class="turnhelp">'+(isMine?'カードをタップ。':'他プレイヤーの手番です。')+'</div></div></div>';if(g.phase==='trickPause')h+='<div class="ai">トリック獲得確認中。</div>';else if(!isMine)h+='<div class="ai">'+esc(g.players[seat].name)+'さんの手番です。'+(g.players[seat].isCpu?' CPU思考中':'')+'</div>';var last={};for(var i=0;i<g.lastDraw.length;i++)last[g.lastDraw[i].cardId]=true;if(g.players[mySeat].hand.length){h+='<div class="mobile-tip '+(g.lastDraw.length?'draw-tip':'')+'">'+(g.lastDraw.length?'補充完了':'手札')+'</div><div class="hand">';for(i=0;i<g.players[mySeat].hand.length;i++){var c=g.players[mySeat].hand[i],nd=last[c.id];h+='<button '+(isMine?'':'disabled')+' class="card '+c.suit+(nd?' newdraw':'')+'" onclick="send(\'play\',{cardId:\''+c.id+'\'})"><span class="num">'+c.rank+'</span><span class="mark">'+suit(c.suit).mark+'</span></button>';}h+='</div>';}h+='</div>';return h;}
-function renderGame(){shell('<div class="game-top"><section class="panel"><h2>プレイヤー</h2>'+playerHTML()+'</section><section class="panel"><h2>スコア</h2>'+scoreHTML()+'</section></div><div class="game-main"><section class="panel"><h2>場のカード</h2>'+tableHTML()+'</section><section class="panel"><h2>手番</h2>'+turnHTML()+'</section></div><section class="panel" style="margin-top:10px"><h2>ログ</h2><div class="log">'+logHTML()+'</div></section>');}
+function renderGame(){shell('<div class="game-top"><section class="panel"><h2>プレイヤー</h2>'+playerHTML()+'</section><section class="panel"><h2>スコア</h2>'+scoreHTML()+'</section></div><div class="game-main"><section class="panel"><h2>場のカード</h2>'+tableHTML()+cpuBubblesHTML()+'</section><section class="panel"><h2>手番</h2>'+turnHTML()+'</section></div><section class="panel" style="margin-top:10px"><h2>ログ</h2><div class="log">'+logHTML()+'</div></section>');}
 function logHTML(){var h='',l=state.game.log;for(var i=0;i<l.length;i++)h+='<div>'+esc(l[i])+'</div>';return h;}
 function renderRoundEnd(){var g=state.game,rr=g.results[g.results.length-1],h='<section class="panel result-card"><h2>ラウンド終了</h2><p class="note">'+esc(rr.desc)+'</p><div class="gain-list">';for(var i=0;i<4;i++)h+='<div class="gain-row"><div><div class="gain-name">'+esc(g.players[i].name)+'</div><div class="gain-sub">'+g.players[i].role+' / '+rr.tricks[i]+'T</div></div><div class="gain-point">+'+rr.gained[i]+'</div></div>';h+='</div><div style="margin-top:10px">'+scoreHTML()+'</div><div class="row" style="margin-top:10px"><button class="btn" onclick="send(\'nextRound\')">次へ</button></div></section>';shell(h);}
 function renderGameEnd(){var g=state.game,n=[];for(var i=0;i<g.winnerSeats.length;i++)n.push(g.players[g.winnerSeats[i]].name);shell('<section class="panel result-card"><h2>ゲーム終了</h2><div style="font-size:26px;font-weight:1000;color:#0f3762">🏆 '+esc(n.join('・'))+'さんの勝利！</div><p class="note">4ラウンド終了。合計点トップが勝利。</p><div class="row"><button class="btn" onclick="send(\'again\')">待機室へ</button></div></section><section class="panel" style="margin-top:10px"><h2>最終スコア</h2>'+scoreHTML()+'</section>');}
