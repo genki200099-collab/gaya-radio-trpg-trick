@@ -98,6 +98,7 @@ function newGame(room) {
     results:[],
     players: room.players.map(p => ({
       name: p.name,
+      isCpu: !!p.isCpu,
       score:0,
       tricks:0,
       hand:[]
@@ -135,13 +136,13 @@ function currentWinner(g) {
   }
   return win;
 }
-function playCard(room, client, cardId) {
+function playCard(room, client, cardId, cpuMode) {
   const g = room.game;
-  if (!g || g.phase !== 'playing') return send(client.ws, 'errorMsg', '今はカードを出せません');
-  if (currentSeat(g) !== client.seat) return send(client.ws, 'errorMsg', 'あなたの手番ではありません');
+  if (!g || g.phase !== 'playing') { if(!cpuMode) send(client.ws, 'errorMsg', '今はカードを出せません'); return; }
+  if (currentSeat(g) !== client.seat) { if(!cpuMode) send(client.ws, 'errorMsg', 'あなたの手番ではありません'); return; }
   const p = g.players[client.seat];
   const idx = p.hand.findIndex(c => c.id === cardId);
-  if (idx < 0) return send(client.ws, 'errorMsg', 'そのカードはありません');
+  if (idx < 0) { if(!cpuMode) send(client.ws, 'errorMsg', 'そのカードはありません'); return; }
   const card = p.hand.splice(idx, 1)[0];
   g.lastDraw = g.lastDraw.filter(d => d.seat !== client.seat);
   g.trick.push({seat:client.seat, card});
@@ -149,6 +150,7 @@ function playCard(room, client, cardId) {
   g.turn++;
   if (g.trick.length === 4) startPause(room);
   broadcast(room);
+  maybeCpu(room);
 }
 function startPause(room) {
   const g = room.game;
@@ -179,6 +181,7 @@ function finishPause(room) {
     g.phase = 'playing';
   }
   broadcast(room);
+  maybeCpu(room);
 }
 function allHandsEmpty(g) {
   for (const p of g.players) if (p.hand.length) return false;
@@ -232,6 +235,7 @@ function nextRound(room) {
   g.deck = makeDeck();
   deal(room);
   broadcast(room);
+  maybeCpu(room);
 }
 function finishGame(room) {
   const g = room.game;
@@ -251,6 +255,7 @@ function buildView(room, seat) {
       name:p.name,
       connected: !!p.connected,
       joined: !!p.joined,
+      isCpu: !!p.isCpu,
       seat:i
     })),
     hostSeat: room.hostSeat,
@@ -270,6 +275,7 @@ function buildView(room, seat) {
         tricks:p.tricks,
         handCount:p.hand.length,
         hand: i === seat ? p.hand : [],
+        isCpu: !!p.isCpu,
         role: roleFor(i, g.round)
       })),
       currentSeat: g.phase === 'playing' ? currentSeat(g) : null,
@@ -285,7 +291,7 @@ function handleMessage(client, msg) {
     const code = makeRoomCode();
     const room = {
       code,
-      players:[0,1,2,3].map(i => ({name:'', joined:false, connected:false, token:''})),
+      players:[0,1,2,3].map(i => ({name:'', joined:false, connected:false, token:'', isCpu:false})),
       clients:[],
       hostSeat:0,
       game:null,
@@ -296,11 +302,29 @@ function handleMessage(client, msg) {
   }
   if (data.type === 'join') joinRoom(client, String(data.room || '').toUpperCase(), data.seat, data.name, data.token);
   if (data.type === 'reconnect') reconnectRoom(client, String(data.room || '').toUpperCase(), data.seat, data.token);
+  if (data.type === 'addCpu') {
+    const room = client.room;
+    if (!room || client.seat !== room.hostSeat || room.game) return;
+    addCpu(room, Number(data.seat));
+    broadcast(room);
+  }
+  if (data.type === 'fillCpu') {
+    const room = client.room;
+    if (!room || client.seat !== room.hostSeat || room.game) return;
+    fillCpu(room);
+    broadcast(room);
+  }
+  if (data.type === 'removeCpu') {
+    const room = client.room;
+    if (!room || client.seat !== room.hostSeat || room.game) return;
+    removeCpu(room, Number(data.seat));
+    broadcast(room);
+  }
   if (data.type === 'start') {
     const room = client.room;
     if (!room || client.seat !== room.hostSeat) return;
-    for (let i = 0; i < 4; i++) if (!room.players[i].joined) return send(client.ws, 'errorMsg', '4人そろうと開始できます');
-    newGame(room); broadcast(room);
+    for (let i = 0; i < 4; i++) if (!room.players[i].joined) return send(client.ws, 'errorMsg', '空席はCPUで埋めると開始できます');
+    newGame(room); broadcast(room); maybeCpu(room);
   }
   if (data.type === 'play') playCard(client.room, client, data.cardId);
   if (data.type === 'nextRound') {
@@ -310,12 +334,85 @@ function handleMessage(client, msg) {
     if (client.room) { client.room.game = null; broadcast(client.room); }
   }
 }
+
+function cpuName(seat) {
+  const names = ['CPUきくぞう','CPUペグ','CPUなかとー','CPUヤマ'];
+  return names[seat] || ('CPU' + (seat+1));
+}
+function addCpu(room, seat) {
+  if (seat < 0 || seat > 3) return;
+  const p = room.players[seat];
+  if (!p || p.connected || (p.joined && !p.isCpu)) return;
+  p.name = cpuName(seat);
+  p.joined = true;
+  p.connected = false;
+  p.isCpu = true;
+  p.token = '';
+}
+function removeCpu(room, seat) {
+  if (seat < 0 || seat > 3) return;
+  const p = room.players[seat];
+  if (!p || !p.isCpu) return;
+  p.name = '';
+  p.joined = false;
+  p.connected = false;
+  p.isCpu = false;
+  p.token = '';
+}
+function fillCpu(room) {
+  for (let i = 0; i < 4; i++) {
+    if (!room.players[i].joined && !room.players[i].connected) addCpu(room, i);
+  }
+}
+function isCpuSeat(room, seat) {
+  return !!(room && room.players && room.players[seat] && room.players[seat].isCpu);
+}
+function cpuChooseCard(g, seat) {
+  const hand = g.players[seat].hand;
+  if (!hand.length) return null;
+  if (!g.trick.length) {
+    let best = 0;
+    for (let i = 1; i < hand.length; i++) if (hand[i].rank < hand[best].rank) best = i;
+    return hand[best].id;
+  }
+  const lead = g.trick[0].card.suit;
+  const same = [];
+  for (let i = 0; i < hand.length; i++) if (hand[i].suit === lead) same.push(hand[i]);
+  if (same.length) {
+    let best = same[0];
+    for (let i = 1; i < same.length; i++) if (same[i].rank < best.rank) best = same[i];
+    return best.id;
+  }
+  let low = hand[0];
+  for (let i = 1; i < hand.length; i++) if (hand[i].rank < low.rank) low = hand[i];
+  return low.id;
+}
+function maybeCpu(room) {
+  if (!room || !room.game || room.game.phase !== 'playing') return;
+  const seat = currentSeat(room.game);
+  if (!isCpuSeat(room, seat)) return;
+  if (room.cpuTimer) clearTimeout(room.cpuTimer);
+  room.cpuTimer = setTimeout(() => {
+    if (!room.game || room.game.phase !== 'playing') return;
+    const nowSeat = currentSeat(room.game);
+    if (!isCpuSeat(room, nowSeat)) return;
+    const cardId = cpuChooseCard(room.game, nowSeat);
+    if (!cardId) return;
+    playCpuCard(room, nowSeat, cardId);
+  }, 900);
+}
+function playCpuCard(room, seat, cardId) {
+  const fakeClient = {room: room, seat: seat, ws: null};
+  playCard(room, fakeClient, cardId, true);
+}
+
 function joinRoom(client, code, seat, name, token) {
   const room = rooms[code];
   if (!room) return send(client.ws, 'errorMsg', '部屋が見つかりません');
   seat = Number(seat);
   if (seat < 0 || seat > 3 || !Number.isFinite(seat)) seat = firstOpenSeat(room);
   if (seat < 0) return send(client.ws, 'errorMsg', '満席です');
+  if (room.players[seat].isCpu) return send(client.ws, 'errorMsg', 'その席はCPUが使用中です');
   if (room.players[seat].connected) return send(client.ws, 'errorMsg', 'その席は使用中です');
   if (room.players[seat].joined && room.players[seat].token && token !== room.players[seat].token) return send(client.ws, 'errorMsg', 'その席は予約済みです。再接続してください');
   client.room = room;
@@ -344,17 +441,18 @@ function reconnectRoom(client, code, seat, token) {
   broadcast(room);
 }
 function firstOpenSeat(room) {
-  for (let i = 0; i < 4; i++) if (!room.players[i].connected && !room.players[i].joined) return i;
+  for (let i = 0; i < 4; i++) if (!room.players[i].connected && !room.players[i].joined && !room.players[i].isCpu) return i;
   return -1;
 }
 function leave(client) {
   const room = client.room;
   if (!room) return;
-  room.players[client.seat].connected = false;
+  if (!room.players[client.seat].isCpu) room.players[client.seat].connected = false;
   room.clients = room.clients.filter(c => c !== client);
   broadcast(room);
   if (room.clients.length === 0) {
     if (room.timer) clearTimeout(room.timer);
+    if (room.cpuTimer) clearTimeout(room.cpuTimer);
     delete rooms[room.code];
   }
 }
