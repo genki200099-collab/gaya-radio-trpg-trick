@@ -466,8 +466,18 @@ function joinRoom(client, code, seat, name, token) {
   if (!room) return send(client.ws, 'errorMsg', '部屋が見つかりません');
   seat = Number(seat);
   if (seat < 0 || seat > 3 || !Number.isFinite(seat)) seat = firstOpenSeat(room);
-  if (seat < 0) return send(client.ws, 'errorMsg', '満席です');
-  if (room.players[seat].isCpu) return send(client.ws, 'errorMsg', 'その席はCPUが使用中です');
+
+  if (seat >= 0 && seat <= 3) {
+    const requested = room.players[seat];
+    const ownReservation = requested && requested.joined && requested.token && token === requested.token && !requested.isCpu;
+    if ((requested.isCpu || requested.connected || (requested.joined && requested.token && token !== requested.token)) && !ownReservation) {
+      const alt = firstOpenSeat(room);
+      if (alt >= 0) seat = alt;
+    }
+  }
+
+  if (seat < 0) return send(client.ws, 'errorMsg', '満席です。空席がない場合はホストにCPU解除を依頼してください');
+  if (room.players[seat].isCpu) return send(client.ws, 'errorMsg', 'その席はCPUが使用中です。ホストにCPU解除を依頼してください');
   if (room.players[seat].connected) return send(client.ws, 'errorMsg', 'その席は使用中です');
   if (room.players[seat].joined && room.players[seat].token && token !== room.players[seat].token) return send(client.ws, 'errorMsg', 'その席は予約済みです。再接続してください');
   client.room = room;
@@ -477,6 +487,7 @@ function joinRoom(client, code, seat, name, token) {
   room.players[seat].name = safeName(name) || room.players[seat].name || ('P' + (seat+1));
   room.players[seat].joined = true;
   room.players[seat].connected = true;
+  room.players[seat].isCpu = false;
   if (!room.players[seat].token) room.players[seat].token = makeToken();
   broadcast(room);
 }
