@@ -287,6 +287,7 @@ function handleMessage(client, msg) {
   let data;
   try { data = JSON.parse(msg); } catch(e) { return; }
   if (!data || !data.type) return;
+  const payload = data.data || {};
   if (data.type === 'create') {
     const code = makeRoomCode();
     const room = {
@@ -298,14 +299,14 @@ function handleMessage(client, msg) {
       timer:null
     };
     rooms[code] = room;
-    joinRoom(client, code, 0, data.name);
+    joinRoom(client, code, 0, payload.name);
   }
-  if (data.type === 'join') joinRoom(client, String(data.room || '').toUpperCase(), data.seat, data.name, data.token);
-  if (data.type === 'reconnect') reconnectRoom(client, String(data.room || '').toUpperCase(), data.seat, data.token);
+  if (data.type === 'join') joinRoom(client, String(payload.room || '').trim().toUpperCase(), payload.seat, payload.name, payload.token);
+  if (data.type === 'reconnect') reconnectRoom(client, String(payload.room || '').trim().toUpperCase(), payload.seat, payload.token);
   if (data.type === 'addCpu') {
     const room = client.room;
     if (!room || client.seat !== room.hostSeat || room.game) return;
-    addCpu(room, Number(data.seat));
+    addCpu(room, Number(payload.seat));
     broadcast(room);
   }
   if (data.type === 'fillCpu') {
@@ -317,16 +318,16 @@ function handleMessage(client, msg) {
   if (data.type === 'removeCpu') {
     const room = client.room;
     if (!room || client.seat !== room.hostSeat || room.game) return;
-    removeCpu(room, Number(data.seat));
+    removeCpu(room, Number(payload.seat));
     broadcast(room);
   }
   if (data.type === 'start') {
     const room = client.room;
     if (!room || client.seat !== room.hostSeat) return;
-    for (let i = 0; i < 4; i++) if (!room.players[i].joined) return send(client.ws, 'errorMsg', '空席はCPUで埋めると開始できます');
+    for (let i = 0; i < 4; i++) if (!room.players[i].joined) return send(client.ws, 'errorMsg', '空席はCPUで開始できます');
     newGame(room); broadcast(room); maybeCpu(room);
   }
-  if (data.type === 'play') playCard(client.room, client, data.cardId);
+  if (data.type === 'play') playCard(client.room, client, payload.cardId);
   if (data.type === 'nextRound') {
     if (client.room && client.room.game && client.room.game.phase === 'roundEnd') { nextRound(client.room); broadcast(client.room); }
   }
@@ -417,6 +418,7 @@ function joinRoom(client, code, seat, name, token) {
   if (room.players[seat].joined && room.players[seat].token && token !== room.players[seat].token) return send(client.ws, 'errorMsg', 'その席は予約済みです。再接続してください');
   client.room = room;
   client.seat = seat;
+  room.clients = room.clients.filter(c => c !== client);
   room.clients.push(client);
   room.players[seat].name = safeName(name) || room.players[seat].name || ('P' + (seat+1));
   room.players[seat].joined = true;
@@ -430,15 +432,21 @@ function reconnectRoom(client, code, seat, token) {
   seat = Number(seat);
   if (seat < 0 || seat > 3 || !Number.isFinite(seat)) return send(client.ws, 'errorMsg', '再接続情報が不正です');
   const p = room.players[seat];
-  if (!p || !p.joined || !p.token || p.token !== token) return send(client.ws, 'errorMsg', '再接続できません。部屋番号から入り直してください');
+  if (!p || !p.joined || !p.token || p.token !== token) return send(client.ws, 'errorMsg', '再接続できません。入り直してください');
   if (p.connected) {
+    const oldClients = room.clients.filter(c => c.seat === seat);
+    for (const oc of oldClients) {
+      try { if (oc.ws && oc.ws.readyState === WebSocket.OPEN) oc.ws.close(); } catch(e) {}
+    }
     room.clients = room.clients.filter(c => c.seat !== seat);
   }
   client.room = room;
   client.seat = seat;
+  room.clients = room.clients.filter(c => c !== client);
   room.clients.push(client);
   p.connected = true;
   broadcast(room);
+  maybeCpu(room);
 }
 function firstOpenSeat(room) {
   for (let i = 0; i < 4; i++) if (!room.players[i].connected && !room.players[i].joined && !room.players[i].isCpu) return i;
