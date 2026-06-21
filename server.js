@@ -1,0 +1,371 @@
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const WebSocket = require('ws');
+
+const PORT = process.env.PORT || 3000;
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+const server = http.createServer((req, res) => {
+  let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  if (urlPath === '/') urlPath = '/index.html';
+  const filePath = path.join(PUBLIC_DIR, urlPath);
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403); res.end('Forbidden'); return;
+  }
+  fs.readFile(filePath, (err, data) => {
+    if (err) { res.writeHead(404); res.end('Not found'); return; }
+    const ext = path.extname(filePath).toLowerCase();
+    const types = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.svg':'image/svg+xml'};
+    res.writeHead(200, {'Content-Type': types[ext] || 'application/octet-stream'});
+    res.end(data);
+  });
+});
+
+const wss = new WebSocket.Server({ server });
+const rooms = {};
+const SUITS = [
+  {key:'H',mark:'♥',label:'赤'},
+  {key:'S',mark:'♠',label:'青'},
+  {key:'D',mark:'♦',label:'黄'},
+  {key:'C',mark:'♣',label:'緑'}
+];
+
+function makeRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  if (rooms[code]) return makeRoomCode();
+  return code;
+}
+function send(ws, type, data) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type, data}));
+}
+function broadcast(room) {
+  for (const c of room.clients) sendView(c, room);
+}
+function sendView(client, room) {
+  send(client.ws, 'state', buildView(room, client.seat));
+}
+function safeName(s) {
+  s = String(s || '').trim();
+  return s.slice(0, 16) || 'プレイヤー';
+}
+function makeToken() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+function makeDeck() {
+  const deck = [];
+  for (const s of SUITS) for (let r = 1; r <= 9; r++) deck.push({id:s.key + r + '_' + Math.random().toString(36).slice(2,8), suit:s.key, rank:r});
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = deck[i]; deck[i] = deck[j]; deck[j] = t;
+  }
+  return deck;
+}
+function roleFor(seat, round) {
+  const roles = ['きくぞう役','ペグ役','なかとー役','ヤマ役'];
+  return roles[(seat - round + 400) % 4];
+}
+function leadSeat(round) {
+  for (let i = 0; i < 4; i++) if (roleFor(i, round) === 'きくぞう役') return i;
+  return 0;
+}
+function orderFrom(start) {
+  const a = [];
+  for (let i = 0; i < 4; i++) a.push((start + i) % 4);
+  return a;
+}
+function suitLabel(k) {
+  for (const s of SUITS) if (s.key === k) return s;
+  return {key:k,mark:'?',label:k};
+}
+function sortHand(hand) {
+  const order = {H:0,S:1,D:2,C:3};
+  hand.sort((a,b) => order[a.suit] !== order[b.suit] ? order[a.suit] - order[b.suit] : a.rank - b.rank);
+}
+function newGame(room) {
+  const deck = makeDeck();
+  room.game = {
+    phase:'playing',
+    round:0,
+    turn:0,
+    deck,
+    trick:[],
+    lastDraw:[],
+    log:[],
+    results:[],
+    players: room.players.map(p => ({
+      name: p.name,
+      score:0,
+      tricks:0,
+      hand:[]
+    })),
+    pending:null,
+    winnerSeats:null
+  };
+  deal(room);
+  addLog(room, 'ゲーム開始');
+}
+function deal(room) {
+  const g = room.game;
+  for (const p of g.players) { p.hand = []; p.tricks = 0; }
+  g.trick = []; g.lastDraw = []; g.turn = 0; g.pending = null; g.phase = 'playing';
+  for (let n = 0; n < 5; n++) for (let i = 0; i < 4; i++) g.players[i].hand.push(g.deck.pop());
+  for (const p of g.players) sortHand(p.hand);
+  addLog(room, '第' + (g.round + 1) + 'R 開始');
+}
+function addLog(room, msg) {
+  const g = room.game;
+  if (!g) return;
+  g.log.unshift(msg);
+  if (g.log.length > 40) g.log.length = 40;
+}
+function currentSeat(g) {
+  const o = orderFrom(leadSeat(g.round));
+  return o[g.turn % 4];
+}
+function currentWinner(g) {
+  if (g.trick.length === 0) return null;
+  const lead = g.trick[0].card.suit;
+  let win = g.trick[0];
+  for (const t of g.trick) {
+    if (t.card.suit === lead && t.card.rank > win.card.rank) win = t;
+  }
+  return win;
+}
+function playCard(room, client, cardId) {
+  const g = room.game;
+  if (!g || g.phase !== 'playing') return send(client.ws, 'errorMsg', '今はカードを出せません');
+  if (currentSeat(g) !== client.seat) return send(client.ws, 'errorMsg', 'あなたの手番ではありません');
+  const p = g.players[client.seat];
+  const idx = p.hand.findIndex(c => c.id === cardId);
+  if (idx < 0) return send(client.ws, 'errorMsg', 'そのカードはありません');
+  const card = p.hand.splice(idx, 1)[0];
+  g.lastDraw = g.lastDraw.filter(d => d.seat !== client.seat);
+  g.trick.push({seat:client.seat, card});
+  addLog(room, p.name + 'さん：' + card.rank + suitLabel(card.suit).mark);
+  g.turn++;
+  if (g.trick.length === 4) startPause(room);
+  broadcast(room);
+}
+function startPause(room) {
+  const g = room.game;
+  const w = currentWinner(g);
+  if (!w) return;
+  g.phase = 'trickPause';
+  g.pending = {winner:w.seat, until:Date.now()+5000};
+  addLog(room, '獲得確認：' + g.players[w.seat].name + 'さん');
+  if (room.timer) clearTimeout(room.timer);
+  room.timer = setTimeout(() => {
+    finishPause(room);
+  }, 5000);
+}
+function finishPause(room) {
+  const g = room.game;
+  if (!g || g.phase !== 'trickPause') return;
+  const w = currentWinner(g);
+  if (!w) return;
+  g.players[w.seat].tricks++;
+  addLog(room, '獲得確定：' + g.players[w.seat].name + 'さん');
+  g.trick = [];
+  g.pending = null;
+  if (allHandsEmpty(g)) {
+    endRound(room);
+  } else {
+    drawAfter(room);
+    g.turn = 0;
+    g.phase = 'playing';
+  }
+  broadcast(room);
+}
+function allHandsEmpty(g) {
+  for (const p of g.players) if (p.hand.length) return false;
+  return true;
+}
+function drawAfter(room) {
+  const g = room.game;
+  g.lastDraw = [];
+  if (!g.deck.length) return;
+  const o = orderFrom(leadSeat(g.round));
+  for (const seat of o) {
+    if (g.deck.length) {
+      const c = g.deck.pop();
+      g.players[seat].hand.push(c);
+      sortHand(g.players[seat].hand);
+      g.lastDraw.push({seat, cardId:c.id});
+    }
+  }
+  addLog(room, '補充：山札 ' + g.deck.length + '枚');
+}
+function endRound(room) {
+  const g = room.game;
+  const max = Math.max(...g.players.map(p => p.tricks));
+  const maxSeats = [];
+  for (let i = 0; i < 4; i++) if (g.players[i].tricks === max) maxSeats.push(i);
+  const gm = leadSeat(g.round);
+  const gained = [0,0,0,0];
+  let desc = '';
+  if (maxSeats.length === 1 && maxSeats[0] === gm) {
+    gained[gm] = 3; desc = 'きくぞう役が単独最多。';
+  } else if (maxSeats.indexOf(gm) >= 0) {
+    desc = 'きくぞう役を含む同点。得点なし。';
+  } else {
+    for (let i = 0; i < 4; i++) if (i !== gm) gained[i] = 1;
+    for (const s of maxSeats) gained[s] += 1;
+    desc = 'プレイヤー側が最多。';
+  }
+  for (let i = 0; i < 4; i++) g.players[i].score += gained[i];
+  g.results.push({round:g.round+1, desc, tricks:g.players.map(p=>p.tricks), gained});
+  addLog(room, '第' + (g.round+1) + 'R 終了');
+  g.phase = 'roundEnd';
+}
+function nextRound(room) {
+  const g = room.game;
+  if (!g || g.phase !== 'roundEnd') return;
+  if (g.round >= 3) {
+    finishGame(room);
+    return;
+  }
+  g.round++;
+  g.deck = makeDeck();
+  deal(room);
+  broadcast(room);
+}
+function finishGame(room) {
+  const g = room.game;
+  const max = Math.max(...g.players.map(p => p.score));
+  g.winnerSeats = [];
+  for (let i = 0; i < 4; i++) if (g.players[i].score === max) g.winnerSeats.push(i);
+  g.phase = 'gameEnd';
+  addLog(room, 'ゲーム終了');
+}
+function buildView(room, seat) {
+  const g = room.game;
+  return {
+    roomCode: room.code,
+    seat,
+    token: room.players[seat] ? room.players[seat].token : '',
+    players: room.players.map((p,i) => ({
+      name:p.name,
+      connected: !!p.connected,
+      joined: !!p.joined,
+      seat:i
+    })),
+    hostSeat: room.hostSeat,
+    game: g ? {
+      phase:g.phase,
+      round:g.round,
+      deckCount:g.deck.length,
+      trick:g.trick,
+      pending:g.pending,
+      lastDraw:g.lastDraw.filter(d => d.seat === seat),
+      log:g.log.slice(0, 18),
+      results:g.results,
+      winnerSeats:g.winnerSeats,
+      players:g.players.map((p,i) => ({
+        name:p.name,
+        score:p.score,
+        tricks:p.tricks,
+        handCount:p.hand.length,
+        hand: i === seat ? p.hand : [],
+        role: roleFor(i, g.round)
+      })),
+      currentSeat: g.phase === 'playing' ? currentSeat(g) : null,
+      leadSeat: leadSeat(g.round)
+    } : null
+  };
+}
+function handleMessage(client, msg) {
+  let data;
+  try { data = JSON.parse(msg); } catch(e) { return; }
+  if (!data || !data.type) return;
+  if (data.type === 'create') {
+    const code = makeRoomCode();
+    const room = {
+      code,
+      players:[0,1,2,3].map(i => ({name:'', joined:false, connected:false, token:''})),
+      clients:[],
+      hostSeat:0,
+      game:null,
+      timer:null
+    };
+    rooms[code] = room;
+    joinRoom(client, code, 0, data.name);
+  }
+  if (data.type === 'join') joinRoom(client, String(data.room || '').toUpperCase(), data.seat, data.name, data.token);
+  if (data.type === 'reconnect') reconnectRoom(client, String(data.room || '').toUpperCase(), data.seat, data.token);
+  if (data.type === 'start') {
+    const room = client.room;
+    if (!room || client.seat !== room.hostSeat) return;
+    for (let i = 0; i < 4; i++) if (!room.players[i].joined) return send(client.ws, 'errorMsg', '4人そろうと開始できます');
+    newGame(room); broadcast(room);
+  }
+  if (data.type === 'play') playCard(client.room, client, data.cardId);
+  if (data.type === 'nextRound') {
+    if (client.room && client.room.game && client.room.game.phase === 'roundEnd') { nextRound(client.room); broadcast(client.room); }
+  }
+  if (data.type === 'again') {
+    if (client.room) { client.room.game = null; broadcast(client.room); }
+  }
+}
+function joinRoom(client, code, seat, name, token) {
+  const room = rooms[code];
+  if (!room) return send(client.ws, 'errorMsg', '部屋が見つかりません');
+  seat = Number(seat);
+  if (seat < 0 || seat > 3 || !Number.isFinite(seat)) seat = firstOpenSeat(room);
+  if (seat < 0) return send(client.ws, 'errorMsg', '満席です');
+  if (room.players[seat].connected) return send(client.ws, 'errorMsg', 'その席は使用中です');
+  if (room.players[seat].joined && room.players[seat].token && token !== room.players[seat].token) return send(client.ws, 'errorMsg', 'その席は予約済みです。再接続してください');
+  client.room = room;
+  client.seat = seat;
+  room.clients.push(client);
+  room.players[seat].name = safeName(name) || room.players[seat].name || ('P' + (seat+1));
+  room.players[seat].joined = true;
+  room.players[seat].connected = true;
+  if (!room.players[seat].token) room.players[seat].token = makeToken();
+  broadcast(room);
+}
+function reconnectRoom(client, code, seat, token) {
+  const room = rooms[code];
+  if (!room) return send(client.ws, 'errorMsg', '再接続先の部屋が見つかりません');
+  seat = Number(seat);
+  if (seat < 0 || seat > 3 || !Number.isFinite(seat)) return send(client.ws, 'errorMsg', '再接続情報が不正です');
+  const p = room.players[seat];
+  if (!p || !p.joined || !p.token || p.token !== token) return send(client.ws, 'errorMsg', '再接続できません。部屋番号から入り直してください');
+  if (p.connected) {
+    room.clients = room.clients.filter(c => c.seat !== seat);
+  }
+  client.room = room;
+  client.seat = seat;
+  room.clients.push(client);
+  p.connected = true;
+  broadcast(room);
+}
+function firstOpenSeat(room) {
+  for (let i = 0; i < 4; i++) if (!room.players[i].connected && !room.players[i].joined) return i;
+  return -1;
+}
+function leave(client) {
+  const room = client.room;
+  if (!room) return;
+  room.players[client.seat].connected = false;
+  room.clients = room.clients.filter(c => c !== client);
+  broadcast(room);
+  if (room.clients.length === 0) {
+    if (room.timer) clearTimeout(room.timer);
+    delete rooms[room.code];
+  }
+}
+
+wss.on('connection', (ws) => {
+  const client = {ws, room:null, seat:null};
+  ws.on('message', msg => handleMessage(client, msg.toString()));
+  ws.on('close', () => leave(client));
+  send(ws, 'hello', {ok:true});
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('GAYA online server listening on ' + PORT);
+});
